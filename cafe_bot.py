@@ -479,7 +479,7 @@ async def order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         except ValueError:
             await update.message.reply_text("❌ Quantity must be a valid number.")
-return
+            return
 
     if item_name not in MENU:
         await update.message.reply_text("❌ Item not found in the menu. Check `/menu`.")
