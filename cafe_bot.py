@@ -1,4 +1,7 @@
+import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,14 +11,29 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Enable Logging
+# ================= 1. DUMMY WEB SERVER (FOR 24/7 RENDER HOSTING) =================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"The Cafeteria Bot is 24/7 Active & Running!")
+
+    def log_message(self, format, *args):
+        return  # Keep terminal logs clean
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# ================= 2. BOT CONFIGURATION & DATA =================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
 BOT_TOKEN = "8904773233:AAFsfvuVo5BxPxkEwmq7xGoEy4BvPJhT2FQ"
 
-# Role Capacities per Group
 ROLE_LIMITS = {
     "owner": 1,
     "manager": 1,
@@ -32,7 +50,6 @@ ROLE_LIMITS = {
     "gatekeeper": 1,
 }
 
-# Scaled Daily Salaries
 SALARIES = {
     "owner": 5000,
     "manager": 3500,
@@ -49,10 +66,8 @@ SALARIES = {
     "gatekeeper": 1000,
 }
 
-# Roles that have full access to perform all staff operations
 ALL_ROUNDERS = ["owner", "manager", "butler"]
 
-# Economy-Calibrated Menu
 MENU = {
     # Snacks
     "fries": {"category": "Snacks", "price": 40, "type": "kitchen", "ingredients": ["potato", "oil", "salt"]},
@@ -64,7 +79,7 @@ MENU = {
     "pasta": {"category": "Mains", "price": 140, "type": "kitchen", "ingredients": ["pasta", "sauce", "cheese"]},
     "pizza": {"category": "Mains", "price": 180, "type": "kitchen", "ingredients": ["dough", "mozzarella", "sauce"]},
     "steak": {"category": "Mains", "price": 240, "type": "kitchen", "ingredients": ["meat_cut", "butter", "veggies"]},
-    # Coffee
+    # Coffee & Beverages
     "espresso": {"category": "Coffee & Beverages", "price": 35, "type": "barista", "ingredients": ["coffee_beans", "water"]},
     "americano": {"category": "Coffee & Beverages", "price": 45, "type": "barista", "ingredients": ["coffee_beans", "water", "ice"]},
     "cappuccino": {"category": "Coffee & Beverages", "price": 65, "type": "barista", "ingredients": ["coffee_beans", "milk"]},
@@ -81,7 +96,6 @@ MENU = {
     "whiskey": {"category": "Bar", "price": 200, "type": "bar", "ingredients": ["whiskey_bottle"]},
 }
 
-# Group Database State
 groups_data = {}
 
 def get_group(chat_id):
@@ -96,9 +110,9 @@ def get_group(chat_id):
             "order_counter": 1,
             "daily_revenue": 0,
             "orders_completed": 0,
-            "ratings": [],        # list of integers 1-5
-            "pending_offers": {}, # {target_user_id: {"role": role, "chat_id": chat_id}}
-            "impeach_votes": set(), # set of voter user_ids
+            "ratings": [],
+            "pending_offers": {},
+            "impeach_votes": set(),
         }
     return groups_data[chat_id]
 
@@ -110,11 +124,8 @@ def check_role(group, user_id, required_role):
     if not user_info:
         return False
     user_role = user_info["role"]
-    
-    # Owner, Manager, and Butler can do all jobs
     if user_role in ALL_ROUNDERS:
         return True
-        
     if isinstance(required_role, list):
         return user_role in required_role
     return user_role == required_role
@@ -122,22 +133,22 @@ def check_role(group, user_id, required_role):
 def normalize_role(role_str):
     return role_str.strip().lower().replace(" ", "_")
 
-# ================= COMMAND HANDLERS =================
+# ================= 3. COMMAND HANDLERS =================
 
-# 1. Detailed Help Command
+# /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📜 **CAFE MANAGEMENT BOT - ALL COMMANDS** 📜\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "👥 **Customer & General Commands:**\n"
         "• `/help` — View this complete command list\n"
-        "• `/menu` — View available food, coffee & bar menu\n"
-        "• `/order <item> [qty]` — Order items (e.g., `/order pizza 2`)\n"
+        "• `/menu` — View available food, coffee & bar drinks\n"
+        "• `/order <item> [qty]` — Order items (e.g., `/order burger 2`)\n"
         "• `/account` — Check your wallet balance, role & salary\n"
         "• `/daily` — Claim daily 10,000 coins (+ role salary)\n"
-        "• `/tip <order_id> <amount>` — Tip the waiter/butler\n"
+        "• `/tip <order_id> <amount>` — Tip the staff member\n"
         "• `/rate <1-5>` — Rate the cafe (1 to 5 stars)\n"
-        "• `/impeach_owner` — Vote to remove the current Owner (Needs 5 votes)\n\n"
+        "• `/impeach_owner` — Vote to remove the Owner (5 votes needed)\n\n"
         "💼 **Role & Staff Management:**\n"
         "• `/claim_role <role>` — Take an open job role\n"
         "• `/workers` — View list of all active cafe staff\n"
@@ -158,7 +169,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-# 2. Claim Role
+# /claim_role
 async def claim_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -174,7 +185,7 @@ async def claim_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     requested_role = normalize_role(" ".join(context.args))
     if requested_role not in ROLE_LIMITS:
-        await update.message.reply_text("❌ Invalid role name! Type `/claim_role` to view valid options.")
+        await update.message.reply_text("❌ Invalid role name! Type `/claim_role` to view options.")
         return
 
     current_count = sum(1 for data in group["roles"].values() if data["role"] == requested_role)
@@ -190,7 +201,7 @@ async def claim_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# 3. Account Check
+# /account
 async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -212,7 +223,7 @@ async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# 4. View Workers
+# /workers
 async def workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     group = get_group(chat_id)
@@ -224,8 +235,7 @@ async def workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🏢 **CAFE STAFF DIRECTORY** 🏢\n\n"
     by_role = {}
     for uid, data in group["roles"].items():
-        r = data["role"]
-        by_role.setdefault(r, []).append(data["name"])
+        by_role.setdefault(data["role"], []).append(data["name"])
 
     for role, names in by_role.items():
         role_title = role.replace("_", " ").title()
@@ -234,7 +244,7 @@ async def workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# 5. Appoint Worker (Owner & Manager)
+# /appoint
 async def appoint(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     sender = update.effective_user
@@ -323,7 +333,7 @@ async def job_response_callback(update: Update, context: ContextTypes.DEFAULT_TY
         group["pending_offers"].pop(user.id, None)
         await query.edit_message_text(f"❌ {user.first_name} declined the job offer.")
 
-# 6. Fire Worker
+# /fire
 async def fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     sender = update.effective_user
@@ -344,7 +354,6 @@ async def fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target_role = group["roles"][target_user.id]["role"]
-
     if target_role == "owner":
         await update.message.reply_text("❌ The Owner cannot be fired directly! Use `/impeach_owner` to vote them out.")
         return
@@ -358,7 +367,7 @@ async def fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚠️ {target_user.first_name} has been dismissed from their position as **{target_role.replace('_', ' ').title()}**."
     )
 
-# 7. Impeach Owner (5 Votes Required)
+# /impeach_owner
 async def impeach_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     voter = update.effective_user
@@ -375,14 +384,13 @@ async def impeach_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if voter.id in group["impeach_votes"]:
-        await update.message.reply_text(f"⚠️ {voter.first_name}, you have already voted! Current votes: **{len(group['impeach_votes'])}/5**", parse_mode="Markdown")
+        await update.message.reply_text(f"⚠️ {voter.first_name}, you already voted! Current votes: **{len(group['impeach_votes'])}/5**", parse_mode="Markdown")
         return
 
     group["impeach_votes"].add(voter.id)
     vote_count = len(group["impeach_votes"])
 
     if vote_count >= 5:
-        # Owner is impeached
         del group["roles"][owner_id]
         group["impeach_votes"].clear()
         await update.message.reply_text(
@@ -401,7 +409,7 @@ async def impeach_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# 8. Daily Allowance & Salary
+# /daily
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -431,7 +439,7 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# 9. Menu
+# /menu
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     categories = {}
     for item_key, details in MENU.items():
@@ -447,7 +455,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += "\n📌 Order Format: `/order <item> [quantity]` (e.g. `/order burger 2`)"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# 10. Order with Quantity
+# /order
 async def order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -471,7 +479,7 @@ async def order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         except ValueError:
             await update.message.reply_text("❌ Quantity must be a valid number.")
-            return
+return
 
     if item_name not in MENU:
         await update.message.reply_text("❌ Item not found in the menu. Check `/menu`.")
@@ -518,7 +526,7 @@ async def order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# 11. Recipe (Chef / All-Rounders)
+# /recipe
 async def recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -543,14 +551,14 @@ async def recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# 12. Restock Supplies (Store Manager / Bar Manager / All-Rounders)
+# /arrange_ingredients & /arrange_alcohol
 async def arrange_ingredients(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     group = get_group(chat_id)
 
     if not check_role(group, user.id, "store_manager"):
-        await update.message.reply_text("❌ Access Denied: Only a **Store Manager** (or Owner/Manager/Butler) can restock ingredients.")
+        await update.message.reply_text("❌ Access Denied: Only a **Store Manager** can restock ingredients.")
         return
 
     group["stock"]["ingredients"] += 30
@@ -562,13 +570,13 @@ async def arrange_alcohol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group = get_group(chat_id)
 
     if not check_role(group, user.id, "bar_manager"):
-        await update.message.reply_text("❌ Access Denied: Only a **Bar Manager** (or Owner/Manager/Butler) can restock the bar.")
+        await update.message.reply_text("❌ Access Denied: Only a **Bar Manager** can restock the bar.")
         return
 
     group["stock"]["alcohol"] += 30
     await update.message.reply_text(f"🍾 Bar inventory refilled! Current stock: {group['stock']['alcohol']} units.")
 
-# 13. Cook Kitchen Food (Cook / Chef / All-Rounders)
+# /cook
 async def cook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -601,10 +609,10 @@ async def cook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group["stock"]["ingredients"] -= req_stock
     order_data["status"] = "ready_to_serve"
     await update.message.reply_text(
-        f"🍳 Order #{order_id} ({order_data['item'].capitalize()} x {order_data['quantity']}) is cooked! Staff can now deliver with `/serve {order_id}`."
+        f"🍳 Order #{order_id} ({order_data['item'].capitalize()} x {order_data['quantity']}) is cooked! Staff can deliver with `/serve {order_id}`."
     )
 
-# 14. Make Coffee (Barista / All-Rounders)
+# /make
 async def make_coffee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -634,7 +642,7 @@ async def make_coffee(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"☕ Order #{order_id} ({order_data['item'].capitalize()} x {order_data['quantity']}) is ready! Staff can deliver with `/serve {order_id}`."
     )
 
-# 15. Supply Bar Drinks (Bar Manager / All-Rounders)
+# /supply
 async def supply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -667,10 +675,10 @@ async def supply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group["stock"]["alcohol"] -= req_stock
     order_data["status"] = "ready_to_serve"
     await update.message.reply_text(
-        f"🍾 Order #{order_id} ({order_data['item'].capitalize()} x {order_data['quantity']}) is supplied and ready! Staff can now deliver with `/serve {order_id}`."
+        f"🍾 Order #{order_id} ({order_data['item'].capitalize()} x {order_data['quantity']}) is supplied and ready! Staff can deliver with `/serve {order_id}`."
     )
 
-# 16. Serve Order (Waiter / Butler / All-Rounders)
+# /serve
 async def serve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -702,7 +710,7 @@ async def serve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Cashier (or All-Rounders) can now process the invoice with `/billing {order_id}`."
     )
 
-# 17. Billing (Cashier / All-Rounders)
+# /billing
 async def billing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -744,7 +752,7 @@ async def billing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# 18. Tip
+# /tip
 async def tip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -780,7 +788,7 @@ async def tip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group["balances"][waiter_id] = get_user_balance(group, waiter_id) + amount
     await update.message.reply_text(f"💖 Tip of **{amount:,} Coins** successfully delivered to the staff member!")
 
-# 19. Rate Cafe (1-5)
+# /rate
 async def rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -803,7 +811,7 @@ async def rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stars = "⭐" * score
     await update.message.reply_text(f"🌟 Thank you {user.first_name} for rating us {score}/5 {stars}!")
 
-# 20. Operational Summary & Daily Report
+# /summary
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -843,7 +851,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(report, parse_mode="Markdown")
 
-# 21. Cleaning (Cleaner / All-Rounders)
+# /cleaning
 async def cleaning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -856,38 +864,46 @@ async def cleaning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group["is_clean"] = True
     await update.message.reply_text("✨ The cafe has been cleaned and sanitized! Ready for new orders.")
 
-# Main Bot Setup
+# ================= 4. MAIN BOT EXECUTION =================
 def main():
+    # 1. Start the dummy web server in background thread for Render
+    threading.Thread(target=run_web_server, daemon=True).start()
+
+    # 2. Initialize Telegram Application
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers Registration
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("claim_role", claim_role))
-    app.add_handler(CommandHandler("account", account))
-    app.add_handler(CommandHandler("workers", workers))
-    app.add_handler(CommandHandler("appoint", appoint))
-    app.add_handler(CommandHandler("fire", fire))
-    app.add_handler(CommandHandler("impeach_owner", impeach_owner))
-    app.add_handler(CommandHandler("daily", daily))
-    app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("order", order))
-    app.add_handler(CommandHandler("recipe", recipe))
-    app.add_handler(CommandHandler("arrange_ingredients", arrange_ingredients))
-    app.add_handler(CommandHandler("arrange_alcohol", arrange_alcohol))
-    app.add_handler(CommandHandler("cook", cook))
-    app.add_handler(CommandHandler("make", make_coffee))
-    app.add_handler(CommandHandler("supply", supply))
-    app.add_handler(CommandHandler("serve", serve))
-    app.add_handler(CommandHandler("billing", billing))
-    app.add_handler(CommandHandler("tip", tip))
-    app.add_handler(CommandHandler("rate", rate))
-    app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(CommandHandler("cleaning", cleaning))
+    # 3. Register All Handlers
+    handlers = [
+        ("help", help_command),
+        ("claim_role", claim_role),
+        ("account", account),
+        ("workers", workers),
+        ("appoint", appoint),
+        ("fire", fire),
+        ("impeach_owner", impeach_owner),
+        ("daily", daily),
+        ("menu", menu),
+        ("order", order),
+        ("recipe", recipe),
+        ("arrange_ingredients", arrange_ingredients),
+        ("arrange_alcohol", arrange_alcohol),
+        ("cook", cook),
+        ("make", make_coffee),
+        ("supply", supply),
+        ("serve", serve),
+        ("billing", billing),
+        ("tip", tip),
+        ("rate", rate),
+        ("summary", summary),
+        ("cleaning", cleaning),
+    ]
 
-    # Callback Query Handler for Interactive Job Offers
+    for cmd, fn in handlers:
+        app.add_handler(CommandHandler(cmd, fn))
+
     app.add_handler(CallbackQueryHandler(job_response_callback))
 
-    print("Upgraded Cafe Bot is active and running...")
+    print("Cafe Bot is active and running 24/7...")
     app.run_polling()
 
 if __name__ == "__main__":
