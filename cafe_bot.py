@@ -3,6 +3,7 @@ import json
 import sqlite3
 import logging
 import threading
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,23 +14,32 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ================= 1. DUMMY WEB SERVER (FOR 24/7 RENDER HOSTING) =================
+# ================= 1. ROBUST WEB SERVER FOR RENDER =================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"The Cafeteria Bot with Persistent Database is Active!")
+        self.wfile.write(b"OK - Cafe Bot is Running 24/7")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
 
     def log_message(self, format, *args):
-        return
+        return  # Suppress HTTP access logs
 
-def run_web_server():
+def start_server_thread():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# ================= 2. SQLITE PERSISTENT DATABASE =================
+# Start dummy server immediately
+server_thread = threading.Thread(target=start_server_thread, daemon=True)
+server_thread.start()
+
+# ================= 2. DATABASE SETUP =================
 DB_FILE = "cafe_database.db"
 
 def init_db():
@@ -55,7 +65,6 @@ def load_group_data(chat_id):
 
     if row:
         data = json.loads(row[0])
-        # JSON keys are strings, convert user_ids back to integer keys
         data["roles"] = {int(k): v for k, v in data.get("roles", {}).items()}
         data["balances"] = {int(k): v for k, v in data.get("balances", {}).items()}
         data["orders"] = {int(k): v for k, v in data.get("orders", {}).items()}
@@ -64,7 +73,6 @@ def load_group_data(chat_id):
         data["impeach_votes"] = set(data.get("impeach_votes", []))
         return data
     else:
-        # Default fresh state
         new_data = {
             "is_clean": True,
             "roles": {},
@@ -96,7 +104,7 @@ def save_group_data(chat_id, data):
     conn.commit()
     conn.close()
 
-# ================= 3. CONFIGURATION & DATA =================
+# ================= 3. BOT CONFIGURATION =================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -138,27 +146,22 @@ SALARIES = {
 ALL_ROUNDERS = ["owner", "manager", "butler"]
 
 MENU = {
-    # Snacks
     "fries": {"category": "Snacks", "price": 40, "type": "kitchen", "ingredients": ["potato", "oil", "salt"]},
     "garlic_bread": {"category": "Snacks", "price": 50, "type": "kitchen", "ingredients": ["bread", "garlic_butter"]},
     "nuggets": {"category": "Snacks", "price": 75, "type": "kitchen", "ingredients": ["chicken", "batter", "oil"]},
-    # Mains
     "sandwich": {"category": "Mains", "price": 90, "type": "kitchen", "ingredients": ["bread", "veggies", "cheese"]},
     "burger": {"category": "Mains", "price": 110, "type": "kitchen", "ingredients": ["bun", "patty", "lettuce"]},
     "pasta": {"category": "Mains", "price": 140, "type": "kitchen", "ingredients": ["pasta", "sauce", "cheese"]},
     "pizza": {"category": "Mains", "price": 180, "type": "kitchen", "ingredients": ["dough", "mozzarella", "sauce"]},
     "steak": {"category": "Mains", "price": 240, "type": "kitchen", "ingredients": ["meat_cut", "butter", "veggies"]},
-    # Coffee & Beverages
     "espresso": {"category": "Coffee & Beverages", "price": 35, "type": "barista", "ingredients": ["coffee_beans", "water"]},
     "americano": {"category": "Coffee & Beverages", "price": 45, "type": "barista", "ingredients": ["coffee_beans", "water", "ice"]},
     "cappuccino": {"category": "Coffee & Beverages", "price": 65, "type": "barista", "ingredients": ["coffee_beans", "milk"]},
     "frappe": {"category": "Coffee & Beverages", "price": 90, "type": "barista", "ingredients": ["coffee_beans", "milk", "caramel"]},
     "matcha": {"category": "Coffee & Beverages", "price": 95, "type": "barista", "ingredients": ["matcha_powder", "milk"]},
-    # Desserts
     "croissant": {"category": "Bakery & Desserts", "price": 45, "type": "kitchen", "ingredients": ["croissant_pastry"]},
     "brownie": {"category": "Bakery & Desserts", "price": 60, "type": "kitchen", "ingredients": ["chocolate", "flour"]},
     "cheesecake": {"category": "Bakery & Desserts", "price": 85, "type": "kitchen", "ingredients": ["cream_cheese", "biscuit_base"]},
-    # Bar
     "beer": {"category": "Bar", "price": 110, "type": "bar", "ingredients": ["beer_tap"]},
     "mojito": {"category": "Bar", "price": 130, "type": "bar", "ingredients": ["white_rum", "mint", "lime"]},
     "wine": {"category": "Bar", "price": 160, "type": "bar", "ingredients": ["wine_bottle"]},
@@ -182,22 +185,22 @@ def check_role(group, user_id, required_role):
 def normalize_role(role_str):
     return role_str.strip().lower().replace(" ", "_")
 
-# ================= 4. COMMAND HANDLERS =================
+# ================= 4. COMMANDS =================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📜 **CAFE MANAGEMENT BOT - ALL COMMANDS** 📜\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👥 **Customer & General Commands:**\n"
-        "• `/help` — View this command guide\n"
+        "👥 **Customer & General:**\n"
+        "• `/help` — View command guide\n"
         "• `/menu` — View food, coffee & bar menu\n"
-        "• `/order <item> [qty]` — Order items (e.g., `/order burger 2`)\n"
-        "• `/account` — Check balance, role & salary\n"
+        "• `/order <item> [qty]` — Order items\n"
+        "• `/account` — Check balance & salary\n"
         "• `/daily` — Claim 10,000 coins + salary\n"
         "• `/tip <order_id> <amount>` — Tip the staff\n"
         "• `/rate <1-5>` — Rate the cafe (1 to 5 stars)\n"
         "• `/impeach_owner` — Vote to remove the Owner (5 votes)\n\n"
-        "💼 **Management & Hiring:**\n"
+        "💼 **Management:**\n"
         "• `/claim_role <role>` — Take an open role\n"
         "• `/workers` — View staff directory\n"
         "• `/appoint <role>` — Appoint staff (Reply to user)\n"
@@ -211,7 +214,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/make <order_id>` — Prepare coffee (Barista)\n"
         "• `/supply <order_id>` — Supply drinks (Bar Mgr)\n"
         "• `/serve <order_id>` — Deliver food (Waiter/Butler)\n"
-        "• `/billing <order_id>` — Settle bill (Cashier)\n"
+        "• `/billing <order_id>` — Collect payment (Cashier)\n"
         "• `/cleaning` — Clean cafe (Cleaner)\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
@@ -229,7 +232,7 @@ async def claim_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     requested_role = normalize_role(" ".join(context.args))
     if requested_role not in ROLE_LIMITS:
-        await update.message.reply_text("❌ Invalid role name! Check `/claim_role` list.")
+        await update.message.reply_text("❌ Invalid role name! Type `/claim_role` to view options.")
         return
 
     current_count = sum(1 for data in group["roles"].values() if data["role"] == requested_role)
@@ -239,7 +242,7 @@ async def claim_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group["roles"][user.id] = {"role": requested_role, "name": user.first_name}
     save_group_data(chat_id, group)
-    await update.message.reply_text(f"🎉 Congratulations {user.first_name}! You are now assigned as **{requested_role.replace('_', ' ').title()}**.", parse_mode="Markdown")
+    await update.message.reply_text(f"🎉 Congratulations {user.first_name}! You are now **{requested_role.replace('_', ' ').title()}**.", parse_mode="Markdown")
 
 async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -625,12 +628,11 @@ async def cleaning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_group_data(chat_id, group)
     await update.message.reply_text("✨ Cafe cleaned and sanitized!")
 
-# ================= 5. MAIN EXECUTION =================
+# ================= 5. APPLICATION RUNNER =================
 def main():
-    threading.Thread(target=run_web_server, daemon=True).start()
-
     app = Application.builder().token(BOT_TOKEN).build()
-    for cmd, fn in [
+    
+    commands = [
         ("help", help_command), ("claim_role", claim_role), ("account", account),
         ("workers", workers), ("appoint", appoint), ("fire", fire),
         ("impeach_owner", impeach_owner), ("daily", daily), ("menu", menu),
@@ -638,12 +640,14 @@ def main():
         ("arrange_alcohol", arrange_alcohol), ("cook", cook), ("make", make_coffee),
         ("supply", supply), ("serve", serve), ("billing", billing),
         ("tip", tip), ("rate", rate), ("summary", summary), ("cleaning", cleaning)
-    ]:
+    ]
+    for cmd, fn in commands:
         app.add_handler(CommandHandler(cmd, fn))
 
     app.add_handler(CallbackQueryHandler(job_response_callback))
-    print("Cafe Bot is active with Persistent SQLite Database...")
-    app.run_polling()
+    
+    print("Cafe Bot is active and running permanently...")
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
